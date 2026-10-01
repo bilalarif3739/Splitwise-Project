@@ -1,19 +1,69 @@
 <?php
 
+use App\Exceptions\BusinessException;
+use App\Http\Responses\ApiResponse;
+use Illuminate\Auth\AuthenticationException;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
+use Symfony\Component\HttpKernel\Exception\MethodNotAllowedHttpException;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
-        web: __DIR__ . '/../routes/web.php',
-        api: __DIR__ . '/../routes/api.php',
-        commands: __DIR__ . '/../routes/console.php',
+        web: __DIR__.'/../routes/web.php',
+        api: __DIR__.'/../routes/api.php',
+        commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
-    ->withMiddleware(function (Middleware $middleware): void {
-        //
+    ->withMiddleware(function (Middleware $middleware) {
+        // Phase 2 registers the auth / group-authorization middleware aliases here.
     })
-    ->withExceptions(function (Exceptions $exceptions): void {
-        //
+    ->withExceptions(function (Exceptions $exceptions) {
+        $exceptions->render(function (Throwable $e, Request $request) {
+            // Only API routes are forced into the JSON envelope; the web
+            // routes keep Laravel's default error pages.
+            if (! $request->is('api/*')) {
+                return null;
+            }
+
+            $errors  = null;
+            $message = $e->getMessage();
+            $status  = Response::HTTP_INTERNAL_SERVER_ERROR;
+
+            if ($e instanceof BusinessException) {
+                $status  = $e->statusCode();
+                $errors  = $e->errors();
+            } elseif ($e instanceof ValidationException) {
+                $status  = Response::HTTP_UNPROCESSABLE_ENTITY;
+                $message = 'The given data was invalid.';
+                $errors  = $e->errors();
+            } elseif ($e instanceof AuthenticationException) {
+                $status  = Response::HTTP_UNAUTHORIZED;
+                $message = 'Unauthenticated.';
+            } elseif ($e instanceof ModelNotFoundException || $e instanceof NotFoundHttpException) {
+                $status  = Response::HTTP_NOT_FOUND;
+                $message = 'The requested resource was not found.';
+            } elseif ($e instanceof MethodNotAllowedHttpException) {
+                $status  = Response::HTTP_METHOD_NOT_ALLOWED;
+                $message = 'The HTTP method is not supported for this route.';
+            } elseif ($e instanceof HttpExceptionInterface) {
+                // 405 / 429 and friends keep their status but get a sanitised message.
+                $status  = $e->getStatusCode();
+                $message = Response::$statusTexts[$status] ?? 'The request could not be completed.';
+            } else {
+                // Unexpected failure: the real exception is logged, the client
+                // gets nothing but a generic message - no stack traces, no
+                // driver internals, no tokens, no passwords.
+                report($e);
+                $message = 'An unexpected error occurred. Please try again later.';
+            }
+
+            return ApiResponse::error($message, $errors, $status);
+        });
     })->create();
