@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\GroupController;
 use App\Http\Controllers\Api\GroupMemberController;
 use App\Http\Controllers\Api\ProfileController;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\BalanceController;
 
 Route::get('/ping', function () {
     return response()->json([
@@ -41,6 +42,8 @@ Route::middleware('api.token')->group(function () {
     Route::middleware('group.member')->group(function () {
         Route::get('/groups/{group}', [GroupController::class, 'show']);
         Route::get('/groups/{group}/members', [GroupMemberController::class, 'index']);
+        // Balances - members only (section 14)
+        Route::get('/groups/{group}/balances', [BalanceController::class, 'index']);
 
         Route::get('/groups/{group}/expenses', [ExpenseController::class, 'index']);
         Route::post('/groups/{group}/expenses', [ExpenseController::class, 'store']);
