@@ -110,4 +110,98 @@ final class BalanceService
 
         Log::info('Group balances recomputed.', ['group_id' => $groupId]);
     }
+    /**
+     * Section 22: who owes whom, plus the same debts reduced to the fewest
+     * practical number of payments.
+     *
+     * @return array{group_id: string, debts: list<array<string, mixed>>, simplified: list<array<string, mixed>>}
+     */
+    public function debts(Group $group): array
+    {
+        $groupId = $group->stringId();
+        $balances = $this->forGroup($group)['balances'];
+        $names = array_column($balances, 'name', 'user_id');
+
+        // Actual debts: every participant owes the payer their share.
+        $owed = [];
+
+        foreach (Expense::where('group_id', $groupId)->get() as $expense) {
+            $payer = (string) $expense->paid_by;
+
+            foreach ((array) $expense->participants as $participant) {
+                $participant = (array) $participant;
+                $userId = (string) ($participant['user_id'] ?? '');
+                $amount = round((float) ($participant['amount'] ?? 0), 2);
+
+                if ($userId !== '' && $userId !== $payer && $amount > 0) {
+                    $owed[$userId][$payer] = round(($owed[$userId][$payer] ?? 0) + $amount, 2);
+                }
+            }
+        }
+
+        // A settlement pays off what its payer owed the receiver.
+        foreach (Settlement::where('group_id', $groupId)->get() as $settlement) {
+            $from = (string) $settlement->paid_by;
+            $to = (string) $settlement->paid_to;
+
+            $owed[$from][$to] = round(($owed[$from][$to] ?? 0) - (float) $settlement->amount, 2);
+        }
+
+        // Report each pair once, in the direction that is still owed.
+        $debts = [];
+
+        foreach ($owed as $debtor => $creditors) {
+            foreach ($creditors as $creditor => $amount) {
+                $amount = round($amount - ($owed[$creditor][$debtor] ?? 0), 2);
+
+                if ($amount > 0) {
+                    $debts[] = [
+                        'from' => ['user_id' => (string) $debtor, 'name' => $names[$debtor] ?? 'Unknown user'],
+                        'to' => ['user_id' => (string) $creditor, 'name' => $names[$creditor] ?? 'Unknown user'],
+                        'amount' => $amount,
+                    ];
+                }
+            }
+        }
+
+        // Simplify: repeatedly match the largest debtor with the largest creditor.
+        $debtors = [];
+        $creditors = [];
+
+        foreach ($balances as $row) {
+            if ($row['balance'] < 0) {
+                $debtors[] = ['user_id' => $row['user_id'], 'name' => $row['name'], 'amount' => round(abs($row['balance']), 2)];
+            } elseif ($row['balance'] > 0) {
+                $creditors[] = ['user_id' => $row['user_id'], 'name' => $row['name'], 'amount' => $row['balance']];
+            }
+        }
+
+        usort($debtors, static fn(array $a, array $b): int => $b['amount'] <=> $a['amount']);
+        usort($creditors, static fn(array $a, array $b): int => $b['amount'] <=> $a['amount']);
+
+        $simplified = [];
+
+        while ($debtors !== [] && $creditors !== []) {
+            $pay = round(min($debtors[0]['amount'], $creditors[0]['amount']), 2);
+
+            $simplified[] = [
+                'from' => ['user_id' => $debtors[0]['user_id'], 'name' => $debtors[0]['name']],
+                'to' => ['user_id' => $creditors[0]['user_id'], 'name' => $creditors[0]['name']],
+                'amount' => $pay,
+            ];
+
+            $debtors[0]['amount'] = round($debtors[0]['amount'] - $pay, 2);
+            $creditors[0]['amount'] = round($creditors[0]['amount'] - $pay, 2);
+
+            if ($debtors[0]['amount'] < 0.01) {
+                array_shift($debtors);
+            }
+
+            if ($creditors[0]['amount'] < 0.01) {
+                array_shift($creditors);
+            }
+        }
+
+        return ['group_id' => $groupId, 'debts' => $debts, 'simplified' => $simplified];
+    }
 }

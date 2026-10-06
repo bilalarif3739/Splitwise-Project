@@ -44,6 +44,7 @@ Route::middleware('api.token')->group(function () {
         Route::get('/groups/{group}/members', [GroupMemberController::class, 'index']);
         // Balances - members only (section 14)
         Route::get('/groups/{group}/balances', [BalanceController::class, 'index']);
+        Route::get('/groups/{group}/debts', [BalanceController::class, 'debts']);
 
         Route::get('/groups/{group}/expenses', [ExpenseController::class, 'index']);
         Route::post('/groups/{group}/expenses', [ExpenseController::class, 'store']);

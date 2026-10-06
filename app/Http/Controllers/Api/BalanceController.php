@@ -29,4 +29,15 @@ final class BalanceController extends Controller
             'Group balances retrieved successfully.',
         );
     }
+    /** Section 22: GET /api/groups/{group}/debts */
+    public function debts(Request $request): JsonResponse
+    {
+        /** @var Group $group */
+        $group = $request->attributes->get('group');
+
+        return ApiResponse::success(
+            $this->balanceService->debts($group),
+            'Group debts retrieved successfully.',
+        );
+    }
 }
