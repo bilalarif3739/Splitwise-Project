@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\GroupController;
 use App\Http\Controllers\Api\GroupMemberController;
 use App\Http\Controllers\Api\ProfileController;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\ExpenseController;
 
 /*
 |--------------------------------------------------------------------------
@@ -54,6 +55,9 @@ Route::middleware('api.token')->group(function () {
     Route::middleware('group.member')->group(function () {
         Route::get('/groups/{group}', [GroupController::class, 'show']);
         Route::get('/groups/{group}/members', [GroupMemberController::class, 'index']);
+        // Expenses - any member may create and list them (sections 26, 18)
+        Route::get('/groups/{group}/expenses', [ExpenseController::class, 'index']);
+        Route::post('/groups/{group}/expenses', [ExpenseController::class, 'store']);
     });
 
     // -------------------------------------------------------------------
