@@ -11,6 +11,7 @@ use Closure;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\Response;
+use Illuminate\Support\Facades\Auth;
 
 /**
  * The single authentication entry point of the API.
@@ -55,6 +56,7 @@ final class AuthenticateApiToken
         // code expects) and the exact token document (so logout can delete
         // precisely the token that was presented).
         $request->setUserResolver(static fn(): User => $user);
+        Auth::setUser($user);
         $request->attributes->set('api_token', $token);
 
         return $next($request);
