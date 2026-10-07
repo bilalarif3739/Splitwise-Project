@@ -24,11 +24,10 @@ final class SettlementService
 {
     public function __construct(
         private readonly BalanceService $balanceService,
-    ) {
-    }
+    ) {}
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
     public function create(Group $group, User $payer, array $data): Settlement
     {
@@ -36,53 +35,65 @@ final class SettlementService
         $payerId = $payer->stringId();
         $receiverId = (string) $data['paid_to'];
         $amount = round((float) $data['amount'], 2);
+        try {
 
-        // Both users must belong to the group (section 24).
-        if (!$group->hasMember($payerId)) {
-            throw ValidationException::withMessages([
-                'paid_by' => ['The payer is not a member of this group.'],
+            // Both users must belong to the group (section 24).
+            if (! $group->hasMember($payerId)) {
+                throw ValidationException::withMessages([
+                    'paid_by' => ['The payer is not a member of this group.'],
+                ]);
+            }
+
+            $receiver = User::find($receiverId);
+
+            if ($receiver === null) {
+                throw ValidationException::withMessages(['paid_to' => ['The selected user does not exist.']]);
+            }
+
+            if (! $group->hasMember($receiverId)) {
+                throw ValidationException::withMessages([
+                    'paid_to' => ['The selected user is not a member of this group.'],
+                ]);
+            }
+
+            // Payer and receiver must be different people (section 24).
+            if ($payerId === $receiverId) {
+                throw new InvalidSettlementException(
+                    'A member cannot settle with themselves.',
+                    ['paid_to' => ['The payer and receiver must be different users.']],
+                );
+            }
+
+            // Cannot settle more than the outstanding debt (section 24). The
+            // pairwise amount is read from the same debt calculation the debts
+            // endpoint serves, so both always agree.
+            $owed = $this->outstandingBetween($group, $payerId, $receiverId);
+
+            if ($owed <= 0.0) {
+                throw new InvalidSettlementException(
+                    'There is nothing to settle with this member.',
+                    ['paid_to' => ['You do not owe '.$receiver->name.' anything in this group.']],
+                );
+            }
+
+            if ($amount > $owed + 0.01) {
+                throw new InvalidSettlementException(
+                    'The settlement amount exceeds the outstanding debt.',
+                    ['amount' => ['You owe '.$receiver->name.' '.number_format($owed, 2).' in this group.']],
+                );
+            }
+        } catch (\Throwable $e) {
+            // Section 39: a rejected settlement creation is logged with the reason.
+            Log::warning('Settlement creation failed.', [
+                'group_id' => $groupId,
+                'paid_by' => $payerId,
+                'paid_to' => $receiverId,
+                'amount' => $amount,
+                'reason' => $e->getMessage(),
             ]);
+
+            throw $e;
         }
-
-        $receiver = User::find($receiverId);
-
-        if ($receiver === null) {
-            throw ValidationException::withMessages(['paid_to' => ['The selected user does not exist.']]);
-        }
-
-        if (!$group->hasMember($receiverId)) {
-            throw ValidationException::withMessages([
-                'paid_to' => ['The selected user is not a member of this group.'],
-            ]);
-        }
-
-        // Payer and receiver must be different people (section 24).
-        if ($payerId === $receiverId) {
-            throw new InvalidSettlementException(
-                'A member cannot settle with themselves.',
-                ['paid_to' => ['The payer and receiver must be different users.']],
-            );
-        }
-
-        // Cannot settle more than the outstanding debt (section 24). The
-        // pairwise amount is read from the same debt calculation the debts
-        // endpoint serves, so both always agree.
-        $owed = $this->outstandingBetween($group, $payerId, $receiverId);
-
-        if ($owed <= 0.0) {
-            throw new InvalidSettlementException(
-                'There is nothing to settle with this member.',
-                ['paid_to' => ['You do not owe ' . $receiver->name . ' anything in this group.']],
-            );
-        }
-
-        if ($amount > $owed + 0.01) {
-            throw new InvalidSettlementException(
-                'The settlement amount exceeds the outstanding debt.',
-                ['amount' => ['You owe ' . $receiver->name . ' ' . number_format($owed, 2) . ' in this group.']],
-            );
-        }
-
         $settlement = Settlement::create([
             'group_id' => $groupId,
             'paid_by' => $payerId,

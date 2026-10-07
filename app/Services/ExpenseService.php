@@ -12,6 +12,7 @@ use App\Models\Expense;
 use App\Models\Group;
 use App\Models\GroupBalance;
 use App\Models\User;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
@@ -30,24 +31,36 @@ final class ExpenseService
     // -----------------------------------------------------------------------
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
     public function create(Group $group, User $creator, array $data): Expense
     {
-        $this->assertPayerIsMember($group, (string) $data['paid_by']);
-        $this->assertParticipantsAreMembers($group, $data['participants']);
+        try {
+            $this->assertPayerIsMember($group, (string) $data['paid_by']);
+            $this->assertParticipantsAreMembers($group, $data['participants']);
 
-        $amount = round((float) $data['amount'], 2);
-        $shares = $this->calculateShares((string) $data['split_type'], $amount, $data['participants']);
+            $amount = round((float) $data['amount'], 2);
+            $shares = $this->calculateShares((string) $data['split_type'], $amount, $data['participants']);
+        } catch (\Throwable $e) {
+            // Section 39: a rejected expense creation is logged with the reason,
+            // never with the full request payload.
+            Log::warning('Expense creation failed.', [
+                'group_id' => $group->stringId(),
+                'created_by' => $creator->stringId(),
+                'split_type' => $data['split_type'] ?? null,
+                'reason' => $e->getMessage(),
+            ]);
 
+            throw $e;
+        }
         $expense = Expense::create([
-            'group_id'     => $group->stringId(),
-            'description'  => $data['description'],
-            'amount'       => $amount,
-            'paid_by'      => (string) $data['paid_by'],
-            'split_type'   => $data['split_type'],
+            'group_id' => $group->stringId(),
+            'description' => $data['description'],
+            'amount' => $amount,
+            'paid_by' => (string) $data['paid_by'],
+            'split_type' => $data['split_type'],
             'participants' => $shares,
-            'created_by'   => $creator->stringId(),
+            'created_by' => $creator->stringId(),
         ]);
 
         $this->applyBalanceDelta($group->stringId(), $expense);
@@ -58,16 +71,16 @@ final class ExpenseService
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
     public function update(Expense $expense, Group $group, array $data, User $actor): Expense
     {
         $this->assertCanModify($expense, $group, $actor);
 
-        $groupId      = $group->stringId();
-        $amount       = isset($data['amount']) ? round((float) $data['amount'], 2) : (float) $expense->amount;
-        $splitType    = (string) ($data['split_type'] ?? $expense->split_type);
-        $paidBy       = (string) ($data['paid_by'] ?? $expense->paid_by);
+        $groupId = $group->stringId();
+        $amount = isset($data['amount']) ? round((float) $data['amount'], 2) : (float) $expense->amount;
+        $splitType = (string) ($data['split_type'] ?? $expense->split_type);
+        $paidBy = (string) ($data['paid_by'] ?? $expense->paid_by);
         $participants = $data['participants'] ?? $this->participantsAsInput($expense);
 
         $this->assertPayerIsMember($group, $paidBy);
@@ -81,10 +94,10 @@ final class ExpenseService
         $this->applyBalanceDelta($groupId, $expense, -1);
 
         $expense->fill([
-            'description'  => $data['description'] ?? $expense->description,
-            'amount'       => $amount,
-            'paid_by'      => $paidBy,
-            'split_type'   => $splitType,
+            'description' => $data['description'] ?? $expense->description,
+            'amount' => $amount,
+            'paid_by' => $paidBy,
+            'split_type' => $splitType,
             'participants' => $shares,
         ])->save();
 
@@ -116,7 +129,7 @@ final class ExpenseService
     /**
      * Paginated, filterable expense history for a group.
      *
-     * @param  array<string, mixed> $filters
+     * @param  array<string, mixed>  $filters
      * @return array{items: Collection<int, Expense>, total: int, page: int, per_page: int, last_page: int}
      */
     public function history(string $groupId, array $filters, int $page, int $perPage): array
@@ -132,10 +145,10 @@ final class ExpenseService
             ->get();
 
         return [
-            'items'     => $items,
-            'total'     => $total,
-            'page'      => $page,
-            'per_page'  => $perPage,
+            'items' => $items,
+            'total' => $total,
+            'page' => $page,
+            'per_page' => $perPage,
             'last_page' => max(1, (int) ceil($total / $perPage)),
         ];
     }
@@ -152,7 +165,7 @@ final class ExpenseService
         $expense = Expense::find($expenseId);
 
         if ($expense === null) {
-            throw new ExpenseNotFoundException();
+            throw new ExpenseNotFoundException;
         }
 
         $group = Group::find($expense->group_id);
@@ -162,7 +175,7 @@ final class ExpenseService
         }
 
         if (! $group->hasMember($user->stringId())) {
-            throw new UnauthorizedGroupAccessException();
+            throw new UnauthorizedGroupAccessException;
         }
 
         return [$expense, $group];
@@ -173,16 +186,16 @@ final class ExpenseService
     // -----------------------------------------------------------------------
 
     /**
-     * @param  list<array{user_id: string, amount?: mixed, percentage?: mixed}> $participants
+     * @param  list<array{user_id: string, amount?: mixed, percentage?: mixed}>  $participants
      * @return list<array{user_id: string, amount: float, percentage: float|null}>
      */
     private function calculateShares(string $splitType, float $total, array $participants): array
     {
         return match ($splitType) {
-            Expense::SPLIT_EQUAL      => $this->calculateEqual($total, $participants),
-            Expense::SPLIT_EXACT      => $this->calculateExact($total, $participants),
+            Expense::SPLIT_EQUAL => $this->calculateEqual($total, $participants),
+            Expense::SPLIT_EXACT => $this->calculateExact($total, $participants),
             Expense::SPLIT_PERCENTAGE => $this->calculatePercentage($total, $participants),
-            default                   => throw new InvalidExpenseSplitException(
+            default => throw new InvalidExpenseSplitException(
                 'The selected split type is invalid.',
                 ['split_type' => ['Valid split types: '.implode(', ', Expense::SPLIT_TYPES).'.']],
             ),
@@ -193,7 +206,7 @@ final class ExpenseService
      * total / participants, leftover cents handed out one by one so the shares
      * still add up to the total (100 / 3 => 33.34, 33.33, 33.33).
      *
-     * @param  list<array{user_id: string}> $participants
+     * @param  list<array{user_id: string}>  $participants
      * @return list<array{user_id: string, amount: float, percentage: float|null}>
      */
     private function calculateEqual(float $total, array $participants): array
@@ -205,16 +218,16 @@ final class ExpenseService
             );
         }
 
-        $count      = count($participants);
+        $count = count($participants);
         $totalCents = (int) round($total * 100);
-        $baseCents  = intdiv($totalCents, $count);
-        $remainder  = $totalCents - ($baseCents * $count);
+        $baseCents = intdiv($totalCents, $count);
+        $remainder = $totalCents - ($baseCents * $count);
 
         $shares = [];
         foreach (array_values($participants) as $index => $participant) {
             $shares[] = [
-                'user_id'    => (string) $participant['user_id'],
-                'amount'     => ($baseCents + ($index < $remainder ? 1 : 0)) / 100,
+                'user_id' => (string) $participant['user_id'],
+                'amount' => ($baseCents + ($index < $remainder ? 1 : 0)) / 100,
                 'percentage' => null,
             ];
         }
@@ -225,7 +238,7 @@ final class ExpenseService
     /**
      * The caller states each share; the sum must equal the total (section 16).
      *
-     * @param  list<array{user_id: string, amount?: mixed}> $participants
+     * @param  list<array{user_id: string, amount?: mixed}>  $participants
      * @return list<array{user_id: string, amount: float, percentage: float|null}>
      */
     private function calculateExact(float $total, array $participants): array
@@ -238,7 +251,7 @@ final class ExpenseService
         }
 
         $shares = [];
-        $sum    = 0.0;
+        $sum = 0.0;
 
         foreach (array_values($participants) as $index => $participant) {
             $amount = isset($participant['amount']) && is_numeric($participant['amount'])
@@ -259,10 +272,12 @@ final class ExpenseService
         if (abs($sum - $total) > self::MONEY_EPSILON) {
             throw new InvalidExpenseSplitException(
                 'The participant amounts must add up to the expense total.',
-                ['participants' => [
-                    'The shares add up to '.number_format($sum, 2)
-                    .' but the expense total is '.number_format($total, 2).'.',
-                ]],
+                [
+                    'participants' => [
+                        'The shares add up to '.number_format($sum, 2)
+                        .' but the expense total is '.number_format($total, 2).'.',
+                    ],
+                ],
             );
         }
 
@@ -273,7 +288,7 @@ final class ExpenseService
      * The percentages must add up to 100 (section 16). Amounts are derived from
      * the total and any leftover cents go to the largest shares.
      *
-     * @param  list<array{user_id: string, percentage?: mixed}> $participants
+     * @param  list<array{user_id: string, percentage?: mixed}>  $participants
      * @return list<array{user_id: string, amount: float, percentage: float|null}>
      */
     private function calculatePercentage(float $total, array $participants): array
@@ -286,7 +301,7 @@ final class ExpenseService
         }
 
         $percentages = [];
-        $sum         = 0.0;
+        $sum = 0.0;
 
         foreach (array_values($participants) as $index => $participant) {
             $percentage = isset($participant['percentage']) && is_numeric($participant['percentage'])
@@ -312,14 +327,14 @@ final class ExpenseService
         }
 
         $totalCents = (int) round($total * 100);
-        $shares     = [];
-        $allocated  = 0;
+        $shares = [];
+        $allocated = 0;
 
         foreach ($percentages as $index => $percentage) {
             $cents = (int) round($totalCents * $percentage / 100);
             $shares[$index] = [
-                'user_id'    => (string) $participants[$index]['user_id'],
-                'amount'     => $cents / 100,
+                'user_id' => (string) $participants[$index]['user_id'],
+                'amount' => $cents / 100,
                 'percentage' => $percentage,
             ];
             $allocated += $cents;
@@ -364,7 +379,7 @@ final class ExpenseService
     }
 
     /**
-     * @param list<array{user_id: string}> $participants
+     * @param  list<array{user_id: string}>  $participants
      */
     private function assertParticipantsAreMembers(Group $group, array $participants): void
     {
@@ -388,7 +403,7 @@ final class ExpenseService
     private function participantsAsInput(Expense $expense): array
     {
         $splitType = (string) $expense->split_type;
-        $rows      = [];
+        $rows = [];
 
         foreach ((array) $expense->participants as $participant) {
             $participant = (array) $participant;
@@ -408,8 +423,8 @@ final class ExpenseService
     }
 
     /**
-     * @param  array<string, mixed> $filters
-     * @return \Illuminate\Database\Eloquent\Builder<Expense>
+     * @param  array<string, mixed>  $filters
+     * @return Builder<Expense>
      */
     private function applyFilters($builder, array $filters)
     {
@@ -450,7 +465,7 @@ final class ExpenseService
 
         foreach ((array) $expense->participants as $participant) {
             $participant = (array) $participant;
-            $userId      = (string) ($participant['user_id'] ?? '');
+            $userId = (string) ($participant['user_id'] ?? '');
 
             if ($userId !== '') {
                 $deltas[$userId] = ($deltas[$userId] ?? 0.0) - ($sign * round((float) ($participant['amount'] ?? 0), 2));
