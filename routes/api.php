@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\GroupMemberController;
 use App\Http\Controllers\Api\ProfileController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\BalanceController;
+use App\Http\Controllers\Api\SettlementController;
 
 Route::get('/ping', function () {
     return response()->json([
@@ -48,6 +49,10 @@ Route::middleware('api.token')->group(function () {
 
         Route::get('/groups/{group}/expenses', [ExpenseController::class, 'index']);
         Route::post('/groups/{group}/expenses', [ExpenseController::class, 'store']);
+
+        // Settlements - members only (sections 23, 24)
+        Route::get('/groups/{group}/settlements', [SettlementController::class, 'index']);
+        Route::post('/groups/{group}/settlements', [SettlementController::class, 'store']);
     });
 
     // Owner only
