@@ -14,6 +14,7 @@ use App\Models\GroupBalance;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
@@ -75,7 +76,7 @@ final class ExpenseService
      */
     public function update(Expense $expense, Group $group, array $data, User $actor): Expense
     {
-        $this->assertCanModify($expense, $group, $actor);
+        $this->assertCanModify($expense, $actor, 'update');
 
         $groupId = $group->stringId();
         $amount = isset($data['amount']) ? round((float) $data['amount'], 2) : (float) $expense->amount;
@@ -110,7 +111,7 @@ final class ExpenseService
 
     public function delete(Expense $expense, Group $group, User $actor): void
     {
-        $this->assertCanModify($expense, $group, $actor);
+        $this->assertCanModify($expense, $actor, 'delete');
 
         $groupId = $group->stringId();
 
@@ -134,7 +135,7 @@ final class ExpenseService
      */
     public function history(string $groupId, array $filters, int $page, int $perPage): array
     {
-        $build = fn () => $this->applyFilters(Expense::where('group_id', $groupId), $filters);
+        $build = fn() => $this->applyFilters(Expense::where('group_id', $groupId), $filters);
 
         $total = $build()->count();
 
@@ -158,6 +159,9 @@ final class ExpenseService
      * caller belongs to its group, so a non-member gets 403 and a stranger's
      * expense is never readable.
      *
+     * The rule itself lives in ExpensePolicy@view; this method only resolves the
+     * documents and raises the right "not found" exception first.
+     *
      * @return array{0: Expense, 1: Group}
      */
     public function resolveForUser(string $expenseId, User $user): array
@@ -174,7 +178,7 @@ final class ExpenseService
             throw new GroupNotFoundException('The group for this expense no longer exists.');
         }
 
-        if (! $group->hasMember($user->stringId())) {
+        if (!Gate::forUser($user)->allows('view', $expense)) {
             throw new UnauthorizedGroupAccessException;
         }
 
@@ -197,7 +201,7 @@ final class ExpenseService
             Expense::SPLIT_PERCENTAGE => $this->calculatePercentage($total, $participants),
             default => throw new InvalidExpenseSplitException(
                 'The selected split type is invalid.',
-                ['split_type' => ['Valid split types: '.implode(', ', Expense::SPLIT_TYPES).'.']],
+                ['split_type' => ['Valid split types: ' . implode(', ', Expense::SPLIT_TYPES) . '.']],
             ),
         };
     }
@@ -274,8 +278,8 @@ final class ExpenseService
                 'The participant amounts must add up to the expense total.',
                 [
                     'participants' => [
-                        'The shares add up to '.number_format($sum, 2)
-                        .' but the expense total is '.number_format($total, 2).'.',
+                        'The shares add up to ' . number_format($sum, 2)
+                        . ' but the expense total is ' . number_format($total, 2) . '.',
                     ],
                 ],
             );
@@ -322,7 +326,7 @@ final class ExpenseService
         if (abs($sum - 100.0) > self::MONEY_EPSILON) {
             throw new InvalidExpenseSplitException(
                 'The participant percentages must add up to 100%.',
-                ['participants' => ['The percentages add up to '.rtrim(rtrim(number_format($sum, 2, '.', ''), '0'), '.').'% instead of 100%.']],
+                ['participants' => ['The percentages add up to ' . rtrim(rtrim(number_format($sum, 2, '.', ''), '0'), '.') . '% instead of 100%.']],
             );
         }
 
@@ -344,7 +348,7 @@ final class ExpenseService
 
         if ($leftover !== 0) {
             $order = array_keys($shares);
-            usort($order, static fn (int $a, int $b): int => $shares[$b]['amount'] <=> $shares[$a]['amount']);
+            usort($order, static fn(int $a, int $b): int => $shares[$b]['amount'] <=> $shares[$a]['amount']);
 
             for ($i = 0; $i < abs($leftover); $i++) {
                 $index = $order[$i % count($order)];
@@ -359,12 +363,15 @@ final class ExpenseService
     // Authorization and membership (sections 14, 18, 28)
     // -----------------------------------------------------------------------
 
-    private function assertCanModify(Expense $expense, Group $group, User $actor): void
+    /**
+     * The rule - group member AND (payer or group owner) - lives in
+     * ExpensePolicy@update / @delete, so this service and the policy cannot
+     * drift apart. The message is kept here because only the service knows
+     * whether the caller was updating or deleting.
+     */
+    private function assertCanModify(Expense $expense, User $actor, string $ability): void
     {
-        $actorId = $actor->stringId();
-
-        // The payer and the group owner may change or remove an expense.
-        if ((string) $expense->paid_by !== $actorId && ! $group->isOwnedBy($actorId)) {
+        if (!Gate::forUser($actor)->allows($ability, $expense)) {
             throw new UnauthorizedGroupAccessException(
                 'Only the payer or the group owner can modify this expense.'
             );
@@ -373,7 +380,7 @@ final class ExpenseService
 
     private function assertPayerIsMember(Group $group, string $userId): void
     {
-        if (! $group->hasMember($userId)) {
+        if (!$group->hasMember($userId)) {
             throw ValidationException::withMessages(['paid_by' => ['The payer is not a member of this group.']]);
         }
     }
@@ -384,7 +391,7 @@ final class ExpenseService
     private function assertParticipantsAreMembers(Group $group, array $participants): void
     {
         foreach (array_values($participants) as $index => $participant) {
-            if (! $group->hasMember((string) ($participant['user_id'] ?? ''))) {
+            if (!$group->hasMember((string) ($participant['user_id'] ?? ''))) {
                 throw ValidationException::withMessages([
                     "participants.{$index}.user_id" => ['Every participant must be a member of this group.'],
                 ]);
@@ -428,20 +435,20 @@ final class ExpenseService
      */
     private function applyFilters($builder, array $filters)
     {
-        if (! empty($filters['payer'])) {
+        if (!empty($filters['payer'])) {
             $builder->where('paid_by', (string) $filters['payer']);
         }
 
-        if (! empty($filters['split_type'])) {
+        if (!empty($filters['split_type'])) {
             $builder->where('split_type', (string) $filters['split_type']);
         }
 
-        if (! empty($filters['date_from'])) {
-            $builder->where('created_at', '>=', $filters['date_from'].' 00:00:00');
+        if (!empty($filters['date_from'])) {
+            $builder->where('created_at', '>=', $filters['date_from'] . ' 00:00:00');
         }
 
-        if (! empty($filters['date_to'])) {
-            $builder->where('created_at', '<=', $filters['date_to'].' 23:59:59');
+        if (!empty($filters['date_to'])) {
+            $builder->where('created_at', '<=', $filters['date_to'] . ' 23:59:59');
         }
 
         return $builder;
