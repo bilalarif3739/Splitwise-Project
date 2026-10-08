@@ -10,17 +10,20 @@ Route::middleware('api.token')->group(function () {
     Route::get('/groups', [GroupController::class, 'index']);
     Route::post('/groups', [GroupController::class, 'store']);
 
-    // Members only (section 14)
+    // Members only (section 14) - GroupPolicy@view
     Route::middleware('group.member')->group(function () {
         Route::get('/groups/{group}', [GroupController::class, 'show']);
         Route::get('/groups/{group}/members', [GroupMemberController::class, 'index']);
     });
 
-    // Owner only (section 11)
-    Route::middleware('group.owner')->group(function () {
-        Route::match(['put', 'patch'], '/groups/{group}', [GroupController::class, 'update']);
-        Route::delete('/groups/{group}', [GroupController::class, 'destroy']);
-        Route::post('/groups/{group}/members', [GroupMemberController::class, 'store']);
-        Route::delete('/groups/{group}/members/{user}', [GroupMemberController::class, 'destroy']);
-    });
+    // Owner only (section 14, owner-specific permissions) - GroupPolicy@update /
+    // @delete / @manageMembers, chosen by the ability passed after the colon.
+    Route::match(['put', 'patch'], '/groups/{group}', [GroupController::class, 'update'])
+        ->middleware('group.owner:update');
+    Route::delete('/groups/{group}', [GroupController::class, 'destroy'])
+        ->middleware('group.owner:delete');
+    Route::post('/groups/{group}/members', [GroupMemberController::class, 'store'])
+        ->middleware('group.owner:manageMembers');
+    Route::delete('/groups/{group}/members/{user}', [GroupMemberController::class, 'destroy'])
+        ->middleware('group.owner:manageMembers');
 });
