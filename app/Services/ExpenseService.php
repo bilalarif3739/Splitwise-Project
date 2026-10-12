@@ -14,6 +14,7 @@ use App\Models\GroupBalance;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
@@ -21,6 +22,10 @@ use Illuminate\Validation\ValidationException;
 /**
  * All expense business rules: the three split types, history with filtering,
  * update and delete - each keeping group_balances consistent.
+ *
+ * Every write that spans more than one collection runs inside a MongoDB
+ * transaction (section 19), so the expense document and the balance rows it
+ * changes are committed together or not at all.
  */
 final class ExpenseService
 {
@@ -54,17 +59,23 @@ final class ExpenseService
 
             throw $e;
         }
-        $expense = Expense::create([
-            'group_id' => $group->stringId(),
-            'description' => $data['description'],
-            'amount' => $amount,
-            'paid_by' => (string) $data['paid_by'],
-            'split_type' => $data['split_type'],
-            'participants' => $shares,
-            'created_by' => $creator->stringId(),
-        ]);
 
-        $this->applyBalanceDelta($group->stringId(), $expense);
+        // Section 19: the expense document and the balance deltas are one unit.
+        $expense = DB::transaction(function () use ($group, $creator, $amount, $shares, $data): Expense {
+            $expense = Expense::create([
+                'group_id' => $group->stringId(),
+                'description' => $data['description'],
+                'amount' => $amount,
+                'paid_by' => (string) $data['paid_by'],
+                'split_type' => $data['split_type'],
+                'participants' => $shares,
+                'created_by' => $creator->stringId(),
+            ]);
+
+            $this->applyBalanceDelta($group->stringId(), $expense);
+
+            return $expense;
+        });
 
         Log::info('Expense created.', ['expense_id' => $expense->stringId(), 'group_id' => $group->stringId()]);
 
@@ -90,19 +101,23 @@ final class ExpenseService
         // Section 28: recalculate the shares before anything is written.
         $shares = $this->calculateShares($splitType, $amount, $participants);
 
-        // Reverse the old effect first, so the balance ends up reflecting only
-        // the new state of the expense.
-        $this->applyBalanceDelta($groupId, $expense, -1);
+        // Section 19: reverse, rewrite and reapply as one unit, so a failure
+        // half-way cannot leave the expense and the balances disagreeing.
+        DB::transaction(function () use ($groupId, $expense, $data, $amount, $paidBy, $splitType, $shares): void {
+            // Reverse the old effect first, so the balance ends up reflecting
+            // only the new state of the expense.
+            $this->applyBalanceDelta($groupId, $expense, -1);
 
-        $expense->fill([
-            'description' => $data['description'] ?? $expense->description,
-            'amount' => $amount,
-            'paid_by' => $paidBy,
-            'split_type' => $splitType,
-            'participants' => $shares,
-        ])->save();
+            $expense->fill([
+                'description' => $data['description'] ?? $expense->description,
+                'amount' => $amount,
+                'paid_by' => $paidBy,
+                'split_type' => $splitType,
+                'participants' => $shares,
+            ])->save();
 
-        $this->applyBalanceDelta($groupId, $expense);
+            $this->applyBalanceDelta($groupId, $expense);
+        });
 
         Log::info('Expense updated.', ['expense_id' => $expense->stringId(), 'group_id' => $groupId]);
 
@@ -114,13 +129,17 @@ final class ExpenseService
         $this->assertCanModify($expense, $actor, 'delete');
 
         $groupId = $group->stringId();
+        $expenseId = $expense->stringId();
 
-        // Section 29: deleting must affect balances correctly and leave no stale data.
-        $this->applyBalanceDelta($groupId, $expense, -1);
+        // Section 29: deleting must affect balances correctly and leave no stale
+        // data - the balance reversal and the delete belong to one unit (19).
+        DB::transaction(function () use ($groupId, $expense): void {
+            $this->applyBalanceDelta($groupId, $expense, -1);
 
-        $expense->delete();
+            $expense->delete();
+        });
 
-        Log::info('Expense deleted.', ['expense_id' => $expense->stringId(), 'group_id' => $groupId]);
+        Log::info('Expense deleted.', ['expense_id' => $expenseId, 'group_id' => $groupId]);
     }
 
     // -----------------------------------------------------------------------
@@ -135,7 +154,7 @@ final class ExpenseService
      */
     public function history(string $groupId, array $filters, int $page, int $perPage): array
     {
-        $build = fn() => $this->applyFilters(Expense::where('group_id', $groupId), $filters);
+        $build = fn () => $this->applyFilters(Expense::where('group_id', $groupId), $filters);
 
         $total = $build()->count();
 
@@ -178,7 +197,7 @@ final class ExpenseService
             throw new GroupNotFoundException('The group for this expense no longer exists.');
         }
 
-        if (!Gate::forUser($user)->allows('view', $expense)) {
+        if (! Gate::forUser($user)->allows('view', $expense)) {
             throw new UnauthorizedGroupAccessException;
         }
 
@@ -201,7 +220,7 @@ final class ExpenseService
             Expense::SPLIT_PERCENTAGE => $this->calculatePercentage($total, $participants),
             default => throw new InvalidExpenseSplitException(
                 'The selected split type is invalid.',
-                ['split_type' => ['Valid split types: ' . implode(', ', Expense::SPLIT_TYPES) . '.']],
+                ['split_type' => ['Valid split types: '.implode(', ', Expense::SPLIT_TYPES).'.']],
             ),
         };
     }
@@ -278,8 +297,8 @@ final class ExpenseService
                 'The participant amounts must add up to the expense total.',
                 [
                     'participants' => [
-                        'The shares add up to ' . number_format($sum, 2)
-                        . ' but the expense total is ' . number_format($total, 2) . '.',
+                        'The shares add up to '.number_format($sum, 2)
+                        .' but the expense total is '.number_format($total, 2).'.',
                     ],
                 ],
             );
@@ -326,7 +345,7 @@ final class ExpenseService
         if (abs($sum - 100.0) > self::MONEY_EPSILON) {
             throw new InvalidExpenseSplitException(
                 'The participant percentages must add up to 100%.',
-                ['participants' => ['The percentages add up to ' . rtrim(rtrim(number_format($sum, 2, '.', ''), '0'), '.') . '% instead of 100%.']],
+                ['participants' => ['The percentages add up to '.rtrim(rtrim(number_format($sum, 2, '.', ''), '0'), '.').'% instead of 100%.']],
             );
         }
 
@@ -348,7 +367,7 @@ final class ExpenseService
 
         if ($leftover !== 0) {
             $order = array_keys($shares);
-            usort($order, static fn(int $a, int $b): int => $shares[$b]['amount'] <=> $shares[$a]['amount']);
+            usort($order, static fn (int $a, int $b): int => $shares[$b]['amount'] <=> $shares[$a]['amount']);
 
             for ($i = 0; $i < abs($leftover); $i++) {
                 $index = $order[$i % count($order)];
@@ -371,7 +390,7 @@ final class ExpenseService
      */
     private function assertCanModify(Expense $expense, User $actor, string $ability): void
     {
-        if (!Gate::forUser($actor)->allows($ability, $expense)) {
+        if (! Gate::forUser($actor)->allows($ability, $expense)) {
             throw new UnauthorizedGroupAccessException(
                 'Only the payer or the group owner can modify this expense.'
             );
@@ -380,7 +399,7 @@ final class ExpenseService
 
     private function assertPayerIsMember(Group $group, string $userId): void
     {
-        if (!$group->hasMember($userId)) {
+        if (! $group->hasMember($userId)) {
             throw ValidationException::withMessages(['paid_by' => ['The payer is not a member of this group.']]);
         }
     }
@@ -391,7 +410,7 @@ final class ExpenseService
     private function assertParticipantsAreMembers(Group $group, array $participants): void
     {
         foreach (array_values($participants) as $index => $participant) {
-            if (!$group->hasMember((string) ($participant['user_id'] ?? ''))) {
+            if (! $group->hasMember((string) ($participant['user_id'] ?? ''))) {
                 throw ValidationException::withMessages([
                     "participants.{$index}.user_id" => ['Every participant must be a member of this group.'],
                 ]);
@@ -435,20 +454,20 @@ final class ExpenseService
      */
     private function applyFilters($builder, array $filters)
     {
-        if (!empty($filters['payer'])) {
+        if (! empty($filters['payer'])) {
             $builder->where('paid_by', (string) $filters['payer']);
         }
 
-        if (!empty($filters['split_type'])) {
+        if (! empty($filters['split_type'])) {
             $builder->where('split_type', (string) $filters['split_type']);
         }
 
-        if (!empty($filters['date_from'])) {
-            $builder->where('created_at', '>=', $filters['date_from'] . ' 00:00:00');
+        if (! empty($filters['date_from'])) {
+            $builder->where('created_at', '>=', $filters['date_from'].' 00:00:00');
         }
 
-        if (!empty($filters['date_to'])) {
-            $builder->where('created_at', '<=', $filters['date_to'] . ' 23:59:59');
+        if (! empty($filters['date_to'])) {
+            $builder->where('created_at', '<=', $filters['date_to'].' 23:59:59');
         }
 
         return $builder;

@@ -10,6 +10,7 @@ use App\Models\GroupBalance;
 use App\Models\Settlement;
 use App\Models\User;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
@@ -24,19 +25,20 @@ final class SettlementService
 {
     public function __construct(
         private readonly BalanceService $balanceService,
-    ) {}
+    ) {
+    }
 
     /**
-     * @param  array<string, mixed>  $data
+     * @param array<string, mixed> $data
      */
     public function create(Group $group, User $payer, array $data): Settlement
     {
-        $groupId = $group->stringId();
-        $payerId = $payer->stringId();
+        $groupId    = $group->stringId();
+        $payerId    = $payer->stringId();
         $receiverId = (string) $data['paid_to'];
-        $amount = round((float) $data['amount'], 2);
-        try {
+        $amount     = round((float) $data['amount'], 2);
 
+        try {
             // Both users must belong to the group (section 24).
             if (! $group->hasMember($payerId)) {
                 throw ValidationException::withMessages([
@@ -83,34 +85,42 @@ final class SettlementService
                 );
             }
         } catch (\Throwable $e) {
-            // Section 39: a rejected settlement creation is logged with the reason.
+            // Section 39: settlement creation failure, logged without any token
+            // or credential material.
             Log::warning('Settlement creation failed.', [
                 'group_id' => $groupId,
-                'paid_by' => $payerId,
-                'paid_to' => $receiverId,
-                'amount' => $amount,
-                'reason' => $e->getMessage(),
+                'paid_by'  => $payerId,
+                'paid_to'  => $receiverId,
+                'amount'   => $amount,
+                'reason'   => $e->getMessage(),
             ]);
 
             throw $e;
         }
-        $settlement = Settlement::create([
-            'group_id' => $groupId,
-            'paid_by' => $payerId,
-            'paid_to' => $receiverId,
-            'amount' => $amount,
-            'note' => $data['note'] ?? null,
-        ]);
 
-        // The payer has paid off that much of his debt; the receiver is no
-        // longer owed that much.
-        $this->adjustBalance($groupId, $payerId, $amount);
-        $this->adjustBalance($groupId, $receiverId, -$amount);
+        // Section 19: the settlement document and both balance rows are written
+        // together or not at all.
+        $settlement = DB::transaction(function () use ($groupId, $payerId, $receiverId, $amount, $data): Settlement {
+            $settlement = Settlement::create([
+                'group_id' => $groupId,
+                'paid_by'  => $payerId,
+                'paid_to'  => $receiverId,
+                'amount'   => $amount,
+                'note'     => $data['note'] ?? null,
+            ]);
+
+            // The payer has paid off that much of his debt; the receiver is no
+            // longer owed that much.
+            $this->adjustBalance($groupId, $payerId, $amount);
+            $this->adjustBalance($groupId, $receiverId, -$amount);
+
+            return $settlement;
+        });
 
         Log::info('Settlement created.', [
             'settlement_id' => $settlement->stringId(),
-            'group_id' => $groupId,
-            'amount' => $amount,
+            'group_id'      => $groupId,
+            'amount'        => $amount,
         ]);
 
         return $settlement;
@@ -132,10 +142,10 @@ final class SettlementService
             ->get();
 
         return [
-            'items' => $items,
-            'total' => $total,
-            'page' => $page,
-            'per_page' => $perPage,
+            'items'     => $items,
+            'total'     => $total,
+            'page'      => $page,
+            'per_page'  => $perPage,
             'last_page' => max(1, (int) ceil($total / $perPage)),
         ];
     }
@@ -158,8 +168,8 @@ final class SettlementService
 
         if ($balance === null) {
             GroupBalance::create([
-                'group_id' => $groupId,
-                'user_id' => $userId,
+                'group_id'    => $groupId,
+                'user_id'     => $userId,
                 'net_balance' => round($delta, 2),
             ]);
 

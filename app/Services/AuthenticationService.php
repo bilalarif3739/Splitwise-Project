@@ -7,6 +7,7 @@ namespace App\Services;
 use App\Exceptions\UnauthenticatedException;
 use App\Models\Token;
 use App\Models\User;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 
@@ -23,17 +24,22 @@ final class AuthenticationService
      */
     public function register(string $name, string $email, string $password): array
     {
-        $user = User::create([
-            'name' => $name,
-            'email' => $email,
-            'password' => Hash::make($password),
-        ]);
+        return DB::transaction(function () use ($name, $email, $password): array {
 
-        $token = $this->issueToken($user);
+            $user = User::create([
+                'name' => $name,
+                'email' => $email,
+                'password' => Hash::make($password),
+            ]);
 
-        Log::info('User registered.', ['user_id' => $user->stringId()]);
 
-        return [$user, $token];
+            $token = $this->issueToken($user);
+
+
+            return [$user, $token];
+            Log::info('User registered.', ['user_id' => $user->stringId()]);
+        });
+
     }
 
     /**

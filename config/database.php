@@ -115,8 +115,12 @@ return [
             // ],
     'mongodb' => [
     'driver'   => 'mongodb',
-    'dsn'      => env('DB_URI', 'mongodb://127.0.0.1:27017'),
+    'dsn'      => env('DB_DSN', "mongodb://127.0.0.1:27017/splitwise?replicaSet=rs0&directConnection=true"),
     'database' => env('DB_DATABASE', 'splitwise'),
+    'options'=>[
+                 'replicaSet'=>'rs0',
+                 'directConnection'=>true,
+    ],
 ],
 
     ],

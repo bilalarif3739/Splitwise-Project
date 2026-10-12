@@ -13,6 +13,7 @@ use App\Models\GroupBalance;
 use App\Models\Settlement;
 use App\Models\User;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
@@ -96,19 +97,19 @@ final class GroupService
     /**
      * Deleting a group removes everything that belongs to it.
      *
-     * The four deletes are sequential rather than transactional (transactions
-     * are deferred to Phase 7). If a write failed part-way through, orphaned
-     * child documents could remain; they are harmless because every read is
-     * scoped by group_id.
+     * Section 19: four collections are touched, so the whole removal runs in a
+     * single MongoDB transaction - a half-deleted group can never be observed.
      */
     public function delete(Group $group): void
     {
         $groupId = $group->stringId();
 
-        Expense::where('group_id', $groupId)->delete();
-        Settlement::where('group_id', $groupId)->delete();
-        GroupBalance::where('group_id', $groupId)->delete();
-        $group->delete();
+        DB::transaction(function () use ($group, $groupId): void {
+            Expense::where('group_id', $groupId)->delete();
+            Settlement::where('group_id', $groupId)->delete();
+            GroupBalance::where('group_id', $groupId)->delete();
+            $group->delete();
+        });
 
         Log::info('Group deleted.', ['group_id' => $groupId]);
     }
@@ -143,7 +144,8 @@ final class GroupService
 
         // Atomic array append with $addToSet semantics (third argument = only if
         // absent). No read-modify-write of the whole document, so two members
-        // added at the same moment cannot overwrite one another.
+        // added at the same moment cannot overwrite one another. A single
+        // document update needs no transaction.
         Group::where('_id', $group->getKey())->push('member_ids', $userId, true);
 
         $group->refresh();
@@ -186,9 +188,11 @@ final class GroupService
             );
         }
 
-        // Sequential writes (transactions deferred to Phase 7).
-        Group::where('_id', $group->getKey())->pull('member_ids', $userId);
-        GroupBalance::where('group_id', $group->stringId())->where('user_id', $userId)->delete();
+        // Section 19: the membership array and the balance row change together.
+        DB::transaction(function () use ($group, $userId): void {
+            Group::where('_id', $group->getKey())->pull('member_ids', $userId);
+            GroupBalance::where('group_id', $group->stringId())->where('user_id', $userId)->delete();
+        });
 
         $group->refresh();
 
